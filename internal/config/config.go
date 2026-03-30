@@ -18,8 +18,9 @@ type Config struct {
 
 // AgentConfig holds agent CLI settings (Claude, Codex, OpenCode, or Cursor).
 type AgentConfig struct {
-	Provider string `yaml:"provider"` // "claude" (default) | "codex" | "opencode" | "cursor"
-	CLIPath  string `yaml:"cliPath"`  // optional custom path to CLI binary
+	Provider string   `yaml:"provider"`        // "claude" (default) | "codex" | "opencode" | "cursor"
+	CLIPath  string   `yaml:"cliPath"`         // optional custom path to CLI binary
+	AddDirs  []string `yaml:"addDirs,omitempty"` // additional directories to expose to the agent (Claude: --add-dir)
 }
 
 // WorktreeConfig holds worktree-related settings.

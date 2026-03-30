@@ -73,6 +73,7 @@ type Manager struct {
 	provider       Provider
 	baseDir        string         // Project root directory (for CLAUDE.md etc.)
 	config         *config.Config // Project config for post-completion actions
+	addDirs        []string       // additional directories to expose to the agent (e.g. --add-dir for Claude)
 	mu             sync.RWMutex
 	wg             sync.WaitGroup
 	onComplete     func(prdName string)                  // Callback when a PRD completes
@@ -124,6 +125,20 @@ func (m *Manager) SetBaseDir(baseDir string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.baseDir = baseDir
+}
+
+// SetAddDirs sets additional directories to expose to the agent (Claude: --add-dir).
+func (m *Manager) SetAddDirs(dirs []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.addDirs = dirs
+}
+
+// AddDirs returns the current list of additional directories.
+func (m *Manager) AddDirs() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.addDirs
 }
 
 // SetConfig sets the project config for post-completion actions.
@@ -240,6 +255,9 @@ func (m *Manager) Start(name string) error {
 	instance.Loop.buildPrompt = promptBuilderForPRD(instance.PRDPath)
 	m.mu.RLock()
 	instance.Loop.SetRetryConfig(m.retryConfig)
+	if len(m.addDirs) > 0 {
+		instance.Loop.SetAddDirs(m.addDirs)
+	}
 	m.mu.RUnlock()
 	instance.ctx, instance.cancel = context.WithCancel(context.Background())
 	instance.State = LoopStateRunning

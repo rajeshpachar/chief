@@ -31,6 +31,8 @@ const (
 	EventRetrying
 	// EventWatchdogTimeout is emitted when the watchdog kills a hung process.
 	EventWatchdogTimeout
+	// EventResult is emitted when Claude's result message is received (contains SessionID).
+	EventResult
 )
 
 // String returns the string representation of an EventType.
@@ -56,6 +58,8 @@ func (e EventType) String() string {
 		return "Retrying"
 	case EventWatchdogTimeout:
 		return "WatchdogTimeout"
+	case EventResult:
+		return "Result"
 	default:
 		return "Unknown"
 	}
@@ -70,15 +74,17 @@ type Event struct {
 	ToolInput  map[string]interface{}
 	StoryID    string
 	Err        error
-	RetryCount int // Current retry attempt (1-based)
-	RetryMax   int // Maximum retries allowed
+	RetryCount int    // Current retry attempt (1-based)
+	RetryMax   int    // Maximum retries allowed
+	SessionID  string // Claude session ID from result message (used for --resume)
 }
 
 // streamMessage represents the top-level structure of a stream-json line.
 type streamMessage struct {
-	Type    string          `json:"type"`
-	Subtype string          `json:"subtype,omitempty"`
-	Message json.RawMessage `json:"message,omitempty"`
+	Type      string          `json:"type"`
+	Subtype   string          `json:"subtype,omitempty"`
+	Message   json.RawMessage `json:"message,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
 }
 
 // assistantMessage represents the structure of an assistant message.
@@ -134,6 +140,9 @@ func ParseLine(line string) *Event {
 		return parseUserMessage(msg.Message)
 
 	case "result":
+		if msg.SessionID != "" {
+			return &Event{Type: EventResult, SessionID: msg.SessionID}
+		}
 		return nil
 
 	default:

@@ -306,6 +306,9 @@ func NewAppWithOptions(prdPath string, maxIter int, provider loop.Provider) (*Ap
 	manager := loop.NewManager(maxIter, provider)
 	manager.SetBaseDir(baseDir)
 	manager.SetConfig(cfg)
+	if len(cfg.Agent.AddDirs) > 0 {
+		manager.SetAddDirs(cfg.Agent.AddDirs)
+	}
 
 	// Register the initial PRD with the manager
 	manager.Register(prdName, prdPath)
@@ -362,6 +365,16 @@ func (a *App) SetVerbose(v bool) {
 func (a *App) DisableRetry() {
 	if a.manager != nil {
 		a.manager.DisableRetry()
+	}
+}
+
+// SetAddDirs merges additional directories into the manager's add-dirs list.
+// CLI-supplied dirs are merged with any dirs already loaded from config.
+func (a *App) SetAddDirs(dirs []string) {
+	if a.manager != nil && len(dirs) > 0 {
+		existing := a.manager.AddDirs()
+		merged := append(existing, dirs...)
+		a.manager.SetAddDirs(merged)
 	}
 }
 

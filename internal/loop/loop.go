@@ -59,6 +59,8 @@ type Loop struct {
 	watchdogTimeout time.Duration
 	sawStoryDone    bool
 	currentStoryID  string
+	addDirs         []string // additional directories to expose to the agent (e.g. --add-dir for Claude)
+	lastSessionID   string   // Claude session ID from the most recent result message (for --resume)
 }
 
 // NewLoop creates a new Loop instance.
@@ -221,10 +223,14 @@ func (l *Loop) Run(ctx context.Context) error {
 		l.mu.Lock()
 		saw := l.sawStoryDone
 		storyID := l.currentStoryID
+		sessionID := l.lastSessionID
 		l.sawStoryDone = false
 		l.mu.Unlock()
 		if saw && storyID != "" {
 			_ = prd.SetStoryStatus(l.prdPath, storyID, "done")
+			if sessionID != "" {
+				_ = prd.SaveSession(l.prdPath, storyID, sessionID)
+			}
 		}
 		// buildPrompt on the next iteration will return error if all stories are complete,
 		// which causes EventComplete to be emitted above.
@@ -319,7 +325,14 @@ func (l *Loop) runIterationWithRetry(ctx context.Context) error {
 func (l *Loop) runIteration(ctx context.Context) error {
 	workDir := l.effectiveWorkDir()
 	cmd := l.provider.LoopCommand(ctx, l.prompt, workDir)
+
+	// Append --add-dir flags for providers that support it (Claude).
 	l.mu.Lock()
+	if l.provider.Name() == "Claude" {
+		for _, dir := range l.addDirs {
+			cmd.Args = append(cmd.Args, "--add-dir", dir)
+		}
+	}
 	l.agentCmd = cmd
 	// Initialize watchdog state
 	l.lastOutputTime = time.Now()
@@ -475,6 +488,9 @@ func (l *Loop) processOutput(r io.Reader) {
 			if event.Type == EventStoryDone {
 				l.sawStoryDone = true
 			}
+			if event.Type == EventResult && event.SessionID != "" {
+				l.lastSessionID = event.SessionID
+			}
 			l.mu.Unlock()
 			l.events <- *event
 		}
@@ -586,6 +602,13 @@ func (l *Loop) SetWatchdogTimeout(timeout time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.watchdogTimeout = timeout
+}
+
+// SetAddDirs sets additional directories to expose to the agent (Claude: --add-dir).
+func (l *Loop) SetAddDirs(dirs []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.addDirs = dirs
 }
 
 // WatchdogTimeout returns the current watchdog timeout duration.

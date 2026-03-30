@@ -28,8 +28,9 @@ type TUIOptions struct {
 	Merge         bool
 	Force         bool
 	NoRetry       bool
-	Agent         string // --agent claude|codex|opencode|cursor
-	AgentPath     string // --agent-path
+	Agent         string   // --agent claude|codex|opencode|cursor
+	AgentPath     string   // --agent-path
+	AddDirs       []string // --add-dir (repeatable)
 }
 
 func main() {
@@ -56,6 +57,9 @@ func main() {
 			return
 		case "--version", "-v":
 			fmt.Printf("chief version %s\n", Version)
+			return
+		case "resume":
+			runResume()
 			return
 		case "update":
 			runUpdate()
@@ -188,6 +192,16 @@ func parseTUIFlags() *TUIOptions {
 			opts.Force = true
 		case arg == "--no-retry":
 			opts.NoRetry = true
+		case arg == "--add-dir":
+			if i+1 < len(os.Args) {
+				i++
+				opts.AddDirs = append(opts.AddDirs, os.Args[i])
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: --add-dir requires a value\n")
+				os.Exit(1)
+			}
+		case strings.HasPrefix(arg, "--add-dir="):
+			opts.AddDirs = append(opts.AddDirs, strings.TrimPrefix(arg, "--add-dir="))
 		case arg == "--agent" || arg == "--agent-path":
 			i++ // skip value (already parsed by parseAgentFlags)
 		case strings.HasPrefix(arg, "--agent=") || strings.HasPrefix(arg, "--agent-path="):
@@ -309,6 +323,41 @@ func runStatus() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runResume() {
+	opts := cmd.ResumeOptions{}
+	provider := resolveProvider("", "")
+	opts.CLIPath = provider.CLIPath()
+
+	// Parse: chief resume [name] [story-id]
+	args := os.Args[2:]
+	switch len(args) {
+	case 0:
+		// chief resume — use default PRD, list sessions
+	case 1:
+		// chief resume US-003 — default PRD, specific story
+		// OR chief resume auth — named PRD, list sessions
+		if isValidStoryID(args[0]) {
+			opts.StoryID = args[0]
+		} else {
+			opts.Name = args[0]
+		}
+	case 2:
+		// chief resume auth US-003
+		opts.Name = args[0]
+		opts.StoryID = args[1]
+	}
+
+	if err := cmd.RunResume(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// isValidStoryID returns true if the string looks like a story ID (e.g. "US-003", "FIX-01").
+func isValidStoryID(s string) bool {
+	return len(s) > 2 && strings.Contains(s, "-")
 }
 
 func runUpdate() {
@@ -457,6 +506,11 @@ func runTUIWithOptions(opts *TUIOptions) {
 		app.DisableRetry()
 	}
 
+	// Merge CLI --add-dir flags with any dirs from config
+	if len(opts.AddDirs) > 0 {
+		app.SetAddDirs(opts.AddDirs)
+	}
+
 	p := tea.NewProgram(app, tea.WithAltScreen())
 	model, err := p.Run()
 	if err != nil {
@@ -508,6 +562,7 @@ Usage:
 Commands:
   new [name] [context]      Create a new PRD interactively
   edit [name] [options]     Edit an existing PRD interactively
+  resume [name] [story-id]  Resume a completed story's Claude session
   status [name]             Show progress for a PRD (default: main)
   list                      List all PRDs with progress
   update                    Update Chief to the latest version
@@ -516,6 +571,7 @@ Commands:
 Global Options:
   --agent <provider>        Agent CLI to use: claude (default), codex, opencode, or cursor
   --agent-path <path>       Custom path to agent CLI binary
+  --add-dir <path>          Expose additional directory to the agent (repeatable; Claude only)
   --max-iterations N, -n N  Set maximum iterations (default: dynamic)
   --no-retry                Disable auto-retry on agent crashes
   --verbose                 Show raw agent output in log
@@ -549,6 +605,9 @@ Examples:
   chief edit                Edit PRD in .chief/prds/main/
   chief edit auth           Edit PRD in .chief/prds/auth/
   chief edit auth --merge   Edit and auto-merge progress
+  chief resume              List resumable sessions for default PRD
+  chief resume US-003       Resume story US-003's Claude session
+  chief resume auth US-003  Resume story US-003 in the auth PRD
   chief status              Show progress for default PRD
   chief status auth         Show progress for auth PRD
   chief list                List all PRDs with progress
