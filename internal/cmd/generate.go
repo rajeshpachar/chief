@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -506,6 +507,9 @@ func sanitizeSlug(s string) string {
 // runClaudeNonInteractive runs claude -p in non-interactive mode and returns the
 // assistant text. Pass a custom env slice (e.g. with ANTHROPIC_API_KEY stripped)
 // as the optional fourth argument; omit to inherit the current process environment.
+//
+// Output is streamed and parsed line-by-line so the full JSON is never buffered
+// in memory — safe for large repos where Claude may read many files.
 func runClaudeNonInteractive(cliPath, workDir, prompt string, env ...[]string) (string, error) {
 	cmd := exec.Command(cliPath,
 		"--dangerously-skip-permissions",
@@ -517,26 +521,77 @@ func runClaudeNonInteractive(cliPath, workDir, prompt string, env ...[]string) (
 	if len(env) > 0 && env[0] != nil {
 		cmd.Env = env[0]
 	}
+	// stderr mirrors stdout for stream-json; discard it to avoid double-buffering.
+	cmd.Stderr = io.Discard
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start claude: %w", err)
+	}
 
-	if err := cmd.Run(); err != nil {
-		// stdout carries the stream-json even on failure (e.g. billing error).
-		// Try to extract a human-readable message from it before falling back to stderr.
-		if msg := extractTextFromStreamJSON(stdout.String()); msg != "" {
-			return "", fmt.Errorf("%w: %s", err, msg)
-		}
-		if s := strings.TrimSpace(stderr.String()); s != "" {
-			return "", fmt.Errorf("%w\nstderr: %s", err, s)
+	// Parse line-by-line without ever holding the full output in memory.
+	text := scanStreamJSON(stdout)
+
+	if err := cmd.Wait(); err != nil {
+		if text != "" {
+			return "", fmt.Errorf("%w: %s", err, text)
 		}
 		return "", err
 	}
+	return text, nil
+}
 
-	// Extract text from stream-json: look for the "result" message which contains
-	// the full assistant response in the "result" field.
-	return extractTextFromStreamJSON(stdout.String()), nil
+// scanStreamJSON reads a stream-json stdout pipe one line at a time and returns
+// the assistant text from the first "result" message it finds, falling back to
+// concatenating all "assistant" text content blocks.
+func scanStreamJSON(r io.Reader) string {
+	type streamMsg struct {
+		Type   string `json:"type"`
+		Result string `json:"result"`
+	}
+	type contentBlock struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	type assistantMsg struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content []contentBlock `json:"content"`
+		} `json:"message"`
+	}
+
+	var resultText string
+	var assistantText strings.Builder
+
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 4*1024*1024), 4*1024*1024) // 4 MB max per line
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var msg streamMsg
+		if jsonUnmarshal(line, &msg) == nil && msg.Type == "result" && msg.Result != "" {
+			resultText = msg.Result
+			continue
+		}
+		var am assistantMsg
+		if jsonUnmarshal(line, &am) == nil && am.Type == "assistant" {
+			for _, block := range am.Message.Content {
+				if block.Type == "text" {
+					assistantText.WriteString(block.Text)
+				}
+			}
+		}
+	}
+
+	if resultText != "" {
+		return resultText
+	}
+	return assistantText.String()
 }
 
 // extractTextFromStreamJSON parses stream-json output from claude CLI and

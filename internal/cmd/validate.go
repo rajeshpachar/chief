@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -608,12 +609,37 @@ func gitCommitAndPush(baseDir, message, branch string) error {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+// runShellCommand runs shellCmd in dir and returns combined output capped at 10 MB.
+// The cap prevents OOM when test runners (e.g. Playwright, Cypress) produce
+// large amounts of output that would otherwise fill an unbounded bytes.Buffer.
 func runShellCommand(dir, shellCmd string) (string, error) {
 	cmd := exec.Command("sh", "-c", shellCmd)
 	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	lb := &limitedBuffer{max: 10 * 1024 * 1024}
+	cmd.Stdout = lb
+	cmd.Stderr = lb
+	err := cmd.Run()
+	return lb.String(), err
 }
+
+// limitedBuffer is an io.Writer that discards writes once the buffer exceeds max bytes.
+type limitedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if b.buf.Len() < b.max {
+		remaining := b.max - b.buf.Len()
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		b.buf.Write(p)
+	}
+	return len(p), nil // always report success so the process isn't disrupted
+}
+
+func (b *limitedBuffer) String() string { return b.buf.String() }
 
 func runCommandInDir(dir, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
