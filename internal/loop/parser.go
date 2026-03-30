@@ -85,6 +85,30 @@ type streamMessage struct {
 	Subtype   string          `json:"subtype,omitempty"`
 	Message   json.RawMessage `json:"message,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
+	Result    string          `json:"result,omitempty"`
+}
+
+// terminalErrors are error strings from Claude that are pointless to retry.
+// They indicate account/auth issues that won't resolve without user action.
+var terminalErrors = []string{
+	"credit balance is too low",
+	"insufficient credits",
+	"invalid api key",
+	"authentication failed",
+	"unauthorized",
+}
+
+// IsTerminalError returns true if the error message indicates a condition
+// that retrying immediately will not fix (e.g. no credits, bad API key).
+func IsTerminalError(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, t := range terminalErrors {
+		if strings.Contains(lower, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // assistantMessage represents the structure of an assistant message.
@@ -140,6 +164,15 @@ func ParseLine(line string) *Event {
 		return parseUserMessage(msg.Message)
 
 	case "result":
+		if msg.IsError && msg.Result != "" {
+			// Claude reported an application-level error (e.g. "Credit balance is too low").
+			// Emit EventError with the human-readable message so the TUI can display it.
+			return &Event{
+				Type:      EventError,
+				Text:      msg.Result,
+				SessionID: msg.SessionID,
+			}
+		}
 		if msg.SessionID != "" {
 			return &Event{Type: EventResult, SessionID: msg.SessionID}
 		}

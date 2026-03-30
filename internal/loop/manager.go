@@ -43,18 +43,19 @@ func (s LoopState) String() string {
 
 // LoopInstance represents a single loop with its metadata.
 type LoopInstance struct {
-	Name        string
-	PRDPath     string
-	WorktreeDir string // Working directory for this PRD (empty = project root)
-	Branch      string // Git branch for this PRD (empty = current branch)
-	Loop        *Loop
-	State       LoopState
-	Iteration   int
-	StartTime   time.Time
-	Error       error
-	ctx         context.Context
-	cancel      context.CancelFunc
-	mu          sync.Mutex
+	Name          string
+	PRDPath       string
+	WorktreeDir   string // Working directory for this PRD (empty = project root)
+	Branch        string // Git branch for this PRD (empty = current branch)
+	Loop          *Loop
+	State         LoopState
+	Iteration     int
+	StartTime     time.Time
+	Error         error
+	resumeOnce    string // session ID to pass to the next loop start (cleared after use)
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mu            sync.Mutex
 }
 
 // ManagerEvent represents an event from any managed loop.
@@ -259,6 +260,11 @@ func (m *Manager) Start(name string) error {
 		instance.Loop.SetAddDirs(m.addDirs)
 	}
 	m.mu.RUnlock()
+	// Transfer pending resume session (set once by triggerReview; cleared after use)
+	if instance.resumeOnce != "" {
+		instance.Loop.SetResumeSessionID(instance.resumeOnce)
+		instance.resumeOnce = ""
+	}
 	instance.ctx, instance.cancel = context.WithCancel(context.Background())
 	instance.State = LoopStateRunning
 	instance.StartTime = time.Now()
@@ -588,4 +594,19 @@ func (m *Manager) SetMaxIterationsForInstance(name string, maxIter int) error {
 	}
 
 	return nil
+}
+
+// SetResumeOnce schedules a --resume <sessionID> for the very next Start() of the named PRD.
+// The session ID is used for the first iteration only, then cleared.
+// No-op if the instance doesn't exist.
+func (m *Manager) SetResumeOnce(name, sessionID string) {
+	m.mu.RLock()
+	instance, exists := m.instances[name]
+	m.mu.RUnlock()
+	if !exists {
+		return
+	}
+	instance.mu.Lock()
+	instance.resumeOnce = sessionID
+	instance.mu.Unlock()
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -61,8 +62,35 @@ func main() {
 		case "resume":
 			runResume()
 			return
+		case "prd":
+			runGenerate()
+			return
+		case "orchestrate":
+			runOrchestrate()
+			return
+		case "validate":
+			runValidate()
+			return
+		case "setup":
+			runSetup()
+			return
+		case "backlog":
+			runBacklog()
+			return
+		case "review":
+			runReview()
+			return
+		case "login":
+			runLogin()
+			return
+		case "auth":
+			runAuthStatus()
+			return
 		case "update":
 			runUpdate()
+			return
+		case "voice-capture":
+			runVoiceCapture()
 			return
 		case "wiggum":
 			printWiggum()
@@ -360,6 +388,330 @@ func isValidStoryID(s string) bool {
 	return len(s) > 2 && strings.Contains(s, "-")
 }
 
+func runGenerate() {
+	opts := cmd.GenerateOptions{}
+
+	// Parse: chief prd [flags] [description...]
+	// Flags: --voice, --type <type>, --no-research, --duration <sec>, --voice-backend <backend>
+	var descParts []string
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--voice":
+			opts.Voice = true
+		case "--no-research":
+			opts.SkipResearch = true
+		case "--type":
+			if i+1 < len(args) {
+				i++
+				opts.ForcedType = args[i]
+			}
+		case "--duration":
+			if i+1 < len(args) {
+				i++
+				fmt.Sscanf(args[i], "%d", &opts.VoiceDuration)
+			}
+		case "--voice-backend":
+			if i+1 < len(args) {
+				i++
+				opts.VoiceBackend = args[i]
+			}
+		case "--list-types":
+			printPRDTypes()
+			return
+		// Legacy flags — silently accepted for compatibility
+		case "--confirm", "--research":
+		default:
+			if !strings.HasPrefix(args[i], "-") {
+				descParts = append(descParts, args[i])
+			}
+		}
+	}
+	opts.Description = strings.Join(descParts, " ")
+
+	provider := resolveProvider("", "")
+	opts.CLIPath = provider.CLIPath()
+
+	if err := cmd.RunGenerate(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func printPRDTypes() {
+	fmt.Println(`chief prd — available types (use --type <name> to force):
+
+  bug-fix        Fix a reported issue, regression, or wrong behavior
+  feature        Build new functionality that does not exist yet
+  test-coverage  Write missing tests, find coverage gaps
+  robustness     Harden existing feature: error handling, edge cases, retries
+  exploration    Understand/map/document how something works, find gaps
+  server-debug   Something broken on staging/prod: investigate and fix
+  refactor       Improve code structure without changing external behavior
+  security       Find vulnerabilities, fix critical ones, audit auth/inputs
+  perf           Profile, find bottleneck, optimize
+  migration      Move from old pattern/library to new one
+  review         Post-implementation audit: architecture, tests, design
+  batch-fix      Process multiple issues in one cycle`)
+}
+
+func runValidate() {
+	opts := cmd.ValidateOptions{}
+	initConfig := false
+	stagingURL := ""
+
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--fix":
+			opts.Fix = true
+		case "--push":
+			opts.Push = true
+		case "--fix-push":
+		case "--cycles":
+			if i+1 < len(args) {
+				i++
+				fmt.Sscanf(args[i], "%d", &opts.MaxCycles)
+			}
+		case "--test-cmd":
+			if i+1 < len(args) {
+				i++
+				opts.LocalTestCmd = args[i]
+			}
+		case "--init":
+			initConfig = true
+		case "--staging-url":
+			if i+1 < len(args) {
+				i++
+				stagingURL = args[i]
+			}
+		}
+	}
+
+	if initConfig {
+		cwd, _ := os.Getwd()
+		if err := cmd.WriteValidateConfig(cwd, stagingURL); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Created .chief/config.yaml with validation section.")
+		fmt.Println("Edit it to add your API tests, then run: chief validate")
+		return
+	}
+
+	provider := resolveProvider("", "")
+	opts.CLIPath = provider.CLIPath()
+
+	if err := cmd.RunValidate(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "Validation failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runOrchestrate() {
+	opts := cmd.OrchestrateOptions{}
+
+	// Parse: chief orchestrate [flags]
+	// Flags: --cycles N, --dry-run
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--cycles":
+			if i+1 < len(args) {
+				i++
+				fmt.Sscanf(args[i], "%d", &opts.MaxCycles)
+			}
+		case "--dry-run":
+			opts.DryRun = true
+		}
+	}
+
+	provider := resolveProvider("", "")
+	opts.CLIPath = provider.CLIPath()
+
+	result, err := cmd.RunOrchestrate(opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if result.AllHealthy {
+		fmt.Printf("All services healthy after %d cycle(s).\n", result.Cycles)
+	} else {
+		fmt.Printf("Orchestration complete (%d cycles). Not all services healthy.\n", result.Cycles)
+		os.Exit(1)
+	}
+}
+
+func runSetup() {
+	opts := cmd.SetupOptions{}
+
+	// Parse: chief setup [flags]
+	// Flags: --force, --docs <url> (repeatable)
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--force":
+			opts.Force = true
+		case "--docs":
+			if i+1 < len(args) {
+				i++
+				opts.DocsURLs = append(opts.DocsURLs, args[i])
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: --docs requires a URL\n")
+				os.Exit(1)
+			}
+		default:
+			if strings.HasPrefix(args[i], "--docs=") {
+				opts.DocsURLs = append(opts.DocsURLs, strings.TrimPrefix(args[i], "--docs="))
+			}
+		}
+	}
+
+	provider := resolveProvider("", "")
+	opts.CLIPath = provider.CLIPath()
+
+	// Respect the useSubscription setting so chief setup works with claude.ai plans.
+	cwd, _ := os.Getwd()
+	if cfg, err := config.Load(cwd); err == nil {
+		opts.UseSubscription = cfg.Agent.UseSubscriptionEnabled()
+	} else {
+		opts.UseSubscription = true // safe default: prefer subscription billing
+	}
+
+	if _, err := cmd.RunSetup(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runBacklog() {
+	opts := cmd.BacklogOptions{}
+
+	// Parse: chief backlog [ISSUE-KEY] [--batch] [--force]
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--batch":
+			opts.Batch = true
+		case "--force":
+			opts.Force = true
+		default:
+			if !strings.HasPrefix(args[i], "-") && opts.IssueKey == "" {
+				opts.IssueKey = args[i]
+			}
+		}
+	}
+
+	provider := resolveProvider("", "")
+	opts.CLIPath = provider.CLIPath()
+
+	if _, err := cmd.RunBacklog(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runLogin() {
+	provider := resolveProvider("", "")
+	c := exec.Command(provider.CLIPath(), "auth", "login")
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	if err := c.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runAuthStatus() {
+	provider := resolveProvider("", "")
+
+	// Load config to check effective useSubscription setting.
+	cwd, _ := os.Getwd()
+	cfg, err := config.Load(cwd)
+	if err != nil {
+		cfg = config.Default()
+	}
+	useSub := cfg.Agent.UseSubscriptionEnabled()
+
+	// Check auth as the agent will actually see it (with or without the API key).
+	status := agent.AuthStatus(provider.CLIPath(), useSub)
+
+	if status == nil {
+		fmt.Println("Could not determine auth status. Is Claude CLI installed?")
+		fmt.Println("Run: chief login")
+		return
+	}
+	if !status.LoggedIn {
+		fmt.Println("Not logged in.")
+		fmt.Println("Run: chief login")
+		return
+	}
+
+	label := status.AuthLabel()
+	fmt.Printf("Logged in  •  %s\n", label)
+
+	if !useSub && status.APIKeySource == "ANTHROPIC_API_KEY" {
+		fmt.Println()
+		fmt.Println("Warning: ANTHROPIC_API_KEY is set and useSubscription is disabled.")
+		fmt.Println("API credits are billed instead of your Max/Pro plan.")
+		fmt.Println("Remove 'useSubscription: false' from .chief/config.yaml to use subscription billing.")
+	}
+}
+
+func runReview() {
+	opts := cmd.ReviewOptions{}
+
+	// Parse: chief review [name]
+	args := os.Args[2:]
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") && opts.Name == "" {
+			opts.Name = arg
+		}
+	}
+
+	result, err := cmd.RunReview(opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println(result.Message)
+	if result.Injected {
+		fmt.Println("Run 'chief' to start the review (or press 'r' in the TUI).")
+	}
+}
+
+// runVoiceCapture records a voice note and writes the transcript to --out <file>.
+// Used internally by the TUI via tea.ExecProcess to capture voice context for reviews.
+func runVoiceCapture() {
+	outFile := ""
+	args := os.Args[2:]
+	for i, arg := range args {
+		if arg == "--out" && i+1 < len(args) {
+			outFile = args[i+1]
+		}
+	}
+	if outFile == "" {
+		fmt.Fprintln(os.Stderr, "voice-capture: --out <file> is required")
+		os.Exit(1)
+	}
+
+	transcript, err := cmd.CollectVoiceInput(cmd.VoiceOptions{})
+	if err != nil {
+		// Write empty file so the TUI can detect failure gracefully.
+		_ = os.WriteFile(outFile, []byte(""), 0o644)
+		fmt.Fprintf(os.Stderr, "voice capture failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := os.WriteFile(outFile, []byte(transcript), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "write transcript: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func runUpdate() {
 	if err := cmd.RunUpdate(cmd.UpdateOptions{
 		Version: Version,
@@ -560,9 +912,18 @@ Usage:
   chief <command> [arguments]
 
 Commands:
+  prd [description]         Generate a PRD (auto-research + optional voice loop)
+  backlog <KEY>             Fetch a Backlog issue, read the repo, generate a fix PRD
+  backlog --batch           Fetch all open issues, group related ones, generate batch PRD
+  setup                     Study repo and configure .chief/config.yaml intelligently
+  validate                  Run API use-case tests → fix → push → CI/CD loop
+  orchestrate               Monitor + auto-fix multiple services in parallel
   new [name] [context]      Create a new PRD interactively
   edit [name] [options]     Edit an existing PRD interactively
   resume [name] [story-id]  Resume a completed story's Claude session
+  review [name]             Audit implementation vs PRD acceptance criteria
+  auth                      Show current authentication status and billing mode
+  login                     Log in to Claude (opens browser for claude.ai subscription)
   status [name]             Show progress for a PRD (default: main)
   list                      List all PRDs with progress
   update                    Update Chief to the latest version
@@ -605,6 +966,14 @@ Examples:
   chief edit                Edit PRD in .chief/prds/main/
   chief edit auth           Edit PRD in .chief/prds/auth/
   chief edit auth --merge   Edit and auto-merge progress
+  chief prd "fix auth bug"           Auto-research + generate PRD
+  chief prd --voice                  Multi-round voice loop → auto-research → PRD
+  chief prd --voice --no-research    Voice → PRD (skip research pass)
+  chief prd --no-research "add X"    Generate PRD without research pass
+  chief prd --type feature "add X"   Force PRD type
+  chief prd --duration 60 --voice    Longer recording per round (default: 30s)
+  chief prd --voice-backend gemini   Force Gemini transcription
+  chief prd --list-types             Show all supported PRD types
   chief resume              List resumable sessions for default PRD
   chief resume US-003       Resume story US-003's Claude session
   chief resume auth US-003  Resume story US-003 in the auth PRD

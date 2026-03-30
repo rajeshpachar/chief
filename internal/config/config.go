@@ -14,13 +14,15 @@ type Config struct {
 	Worktree   WorktreeConfig   `yaml:"worktree"`
 	OnComplete OnCompleteConfig `yaml:"onComplete"`
 	Agent      AgentConfig      `yaml:"agent"`
+	Project    ProjectConfig    `yaml:"project,omitempty"`
 }
 
 // AgentConfig holds agent CLI settings (Claude, Codex, OpenCode, or Cursor).
 type AgentConfig struct {
-	Provider string   `yaml:"provider"`        // "claude" (default) | "codex" | "opencode" | "cursor"
-	CLIPath  string   `yaml:"cliPath"`         // optional custom path to CLI binary
-	AddDirs  []string `yaml:"addDirs,omitempty"` // additional directories to expose to the agent (Claude: --add-dir)
+	Provider        string   `yaml:"provider"`                  // "claude" (default) | "codex" | "opencode" | "cursor"
+	CLIPath         string   `yaml:"cliPath"`                   // optional custom path to CLI binary
+	AddDirs         []string `yaml:"addDirs,omitempty"`         // additional directories to expose to the agent (Claude: --add-dir)
+	UseSubscription *bool    `yaml:"useSubscription,omitempty"` // default true: unset ANTHROPIC_API_KEY so Claude uses claude.ai subscription billing. Set false to allow API key billing.
 }
 
 // WorktreeConfig holds worktree-related settings.
@@ -34,9 +36,21 @@ type OnCompleteConfig struct {
 	CreatePR bool `yaml:"createPR"`
 }
 
-// Default returns a Config with zero-value defaults.
+// Default returns a Config with sensible defaults.
 func Default() *Config {
-	return &Config{}
+	t := true
+	return &Config{
+		Agent: AgentConfig{UseSubscription: &t},
+	}
+}
+
+// UseSubscriptionEnabled returns whether the Claude provider should strip
+// ANTHROPIC_API_KEY from the child process env. Defaults to true.
+func (a *AgentConfig) UseSubscriptionEnabled() bool {
+	if a.UseSubscription == nil {
+		return true
+	}
+	return *a.UseSubscription
 }
 
 // configPath returns the full path to the config file.

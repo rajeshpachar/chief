@@ -17,6 +17,59 @@ func TestDefault(t *testing.T) {
 	if cfg.OnComplete.CreatePR {
 		t.Error("expected CreatePR to be false")
 	}
+	if !cfg.Agent.UseSubscriptionEnabled() {
+		t.Error("expected UseSubscriptionEnabled to be true by default")
+	}
+}
+
+func TestUseSubscriptionEnabled(t *testing.T) {
+	tr := true
+	fa := false
+	tests := []struct {
+		name string
+		ptr  *bool
+		want bool
+	}{
+		{"nil defaults to true", nil, true},
+		{"explicit true", &tr, true},
+		{"explicit false", &fa, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := AgentConfig{UseSubscription: tt.ptr}
+			if got := a.UseSubscriptionEnabled(); got != tt.want {
+				t.Errorf("UseSubscriptionEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUseSubscription_RoundTrip(t *testing.T) {
+	fa := false
+	tests := []struct {
+		name string
+		ptr  *bool
+		want bool
+	}{
+		{"omitted (nil) — loads as default true", nil, true},
+		{"explicit false — survives save/load", &fa, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := &Config{Agent: AgentConfig{UseSubscription: tt.ptr}}
+			if err := Save(dir, cfg); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := loaded.Agent.UseSubscriptionEnabled(); got != tt.want {
+				t.Errorf("after round-trip: UseSubscriptionEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestLoadNonExistent(t *testing.T) {

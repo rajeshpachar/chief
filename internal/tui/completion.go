@@ -240,6 +240,7 @@ func (c *CompletionScreen) Render() string {
 		shortcuts = append(shortcuts, "m: merge")
 		shortcuts = append(shortcuts, "c: clean")
 	}
+	shortcuts = append(shortcuts, "r: review")
 	shortcuts = append(shortcuts, "l: switch PRD")
 	shortcuts = append(shortcuts, "q: quit")
 	content.WriteString(fStyle.Render(strings.Join(shortcuts, "  │  ")))

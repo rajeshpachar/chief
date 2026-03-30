@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/minicodemonkey/chief/internal/agent"
 	"github.com/minicodemonkey/chief/internal/config"
 	"github.com/minicodemonkey/chief/internal/git"
 	"github.com/minicodemonkey/chief/internal/loop"
@@ -24,6 +25,11 @@ type PRDUpdateMsg struct {
 // ProgressUpdateMsg is sent when progress.md changes.
 type ProgressUpdateMsg struct {
 	Entries map[string][]prd.ProgressEntry
+}
+
+// voiceCaptureMsg is returned after the voice-capture subprocess finishes.
+type voiceCaptureMsg struct {
+	transcript string // empty on failure
 }
 
 // AppState represents the current state of the application.
@@ -97,6 +103,7 @@ type autoActionResultMsg struct {
 	prURL   string // Only set for successful PR creation
 	prTitle string // Only set for successful PR creation
 }
+
 
 // completionSpinnerTickMsg is sent to animate the completion screen spinner.
 type completionSpinnerTickMsg struct{}
@@ -225,6 +232,13 @@ type App struct {
 	// Verbose mode - show raw Claude output
 	verbose bool
 
+	// Auth status label shown in the header (e.g. "claude.ai" or "API key")
+	authLabel string
+
+	// reviewVoiceNote holds a voice-captured note to include in the next review prompt.
+	// Cleared after use.
+	reviewVoiceNote string
+
 	// Post-exit action - what to do after TUI exits
 	PostExitAction PostExitAction
 	PostExitPRD    string // PRD name for post-exit action
@@ -345,7 +359,20 @@ func NewAppWithOptions(prdPath string, maxIter int, provider loop.Provider) (*Ap
 		completionScreen: NewCompletionScreen(),
 		settingsOverlay:  NewSettingsOverlay(),
 		quitConfirm:      NewQuitConfirmation(),
+		authLabel:        resolveAuthLabel(provider, cfg),
 	}, nil
+}
+
+// resolveAuthLabel runs `claude auth status` once and returns a short label
+// for the header (e.g. "claude.ai" or "API key"). Fast and best-effort.
+// When useSubscription is enabled, checks auth with ANTHROPIC_API_KEY stripped
+// so the label reflects what Claude actually sees at runtime.
+func resolveAuthLabel(provider loop.Provider, cfg *config.Config) string {
+	if provider.Name() != "Claude" {
+		return provider.Name()
+	}
+	status := agent.AuthStatus(provider.CLIPath(), cfg.Agent.UseSubscriptionEnabled())
+	return status.AuthLabel()
 }
 
 // SetCompletionCallback sets a callback that is called when any PRD completes.
@@ -495,6 +522,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PRDUpdateMsg:
 		return a.handlePRDUpdate(msg)
+
+	case voiceCaptureMsg:
+		if msg.transcript != "" {
+			a.reviewVoiceNote = msg.transcript
+			a.lastActivity = "Voice note captured — press r to start review"
+		} else {
+			a.lastActivity = "Voice capture failed or empty — press r to review without note"
+		}
+		return a, nil
 
 	case LaunchInitMsg:
 		a.PostExitAction = PostExitInit
@@ -652,6 +688,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return a, nil
+
+		// Reviews: r = review (pre-dev when Ready, post-dev when Complete)
+		case "r":
+			if a.state == StateComplete {
+				return a.triggerPostDevReview()
+			}
+			if a.state == StateReady {
+				return a.triggerPreDevReview()
+			}
+
+		// V = capture a voice note that will be included in the next review
+		case "V":
+			if a.state == StateReady || a.state == StateComplete {
+				return a, a.captureVoiceNote()
+			}
 
 		// Loop controls (work in both views)
 		case "s":
@@ -993,8 +1044,13 @@ func (a App) handleLoopEvent(prdName string, event loop.Event) (tea.Model, tea.C
 	case loop.EventError:
 		if isCurrentPRD {
 			a.state = StateError
-			a.err = event.Err
-			if event.Err != nil {
+			// Prefer the human-readable Text (e.g. "Credit balance is too low")
+			// over the Go error wrapping the exit code.
+			if event.Text != "" {
+				a.err = fmt.Errorf("%s", event.Text)
+				a.lastActivity = "Error: " + event.Text
+			} else if event.Err != nil {
+				a.err = event.Err
 				a.lastActivity = "Error: " + event.Err.Error()
 			}
 		}
@@ -1443,6 +1499,120 @@ func (a *App) runAutoCreatePR() tea.Cmd {
 	}
 }
 
+// triggerPostDevReview injects the RV-000 post-implementation review story and restarts the loop.
+// Works from both the completion screen and the dashboard (when state=StateComplete).
+// Optionally resumes the last completed story's Claude session so the reviewer
+// has conversational context about what was just implemented.
+func (a App) triggerPostDevReview() (tea.Model, tea.Cmd) {
+	return a.triggerReview(
+		prd.InjectReviewStory,
+		"Review inject failed",
+		"Review already added — run 'chief' to resume",
+		"Post-dev review added — starting review pass...",
+		true, // resume last session for post-dev context
+	)
+}
+
+// triggerPreDevReview injects the PR-000 pre-development architecture review story
+// and starts the loop. The review runs before any dev story (priority 0.5).
+func (a App) triggerPreDevReview() (tea.Model, tea.Cmd) {
+	return a.triggerReview(
+		prd.InjectPreDevReviewStory,
+		"Pre-dev review inject failed",
+		"Pre-dev review already added (or dev started) — press s to continue",
+		"Architecture review added — starting PRD review...",
+		false, // no session to resume — dev hasn't happened yet
+	)
+}
+
+// triggerReview is the shared implementation for pre- and post-dev review triggers.
+// injector injects the review story; the activity strings drive user feedback.
+// resumeSession, if true, wires --resume <last-session-id> so Claude has prior context.
+func (a App) triggerReview(
+	injector func(path, voiceNote string) (bool, error),
+	errPrefix, alreadyMsg, startMsg string,
+	resumeSession bool,
+) (tea.Model, tea.Cmd) {
+	prdPath := filepath.Join(a.baseDir, ".chief", "prds", a.prdName, "prd.md")
+	voiceNote := a.reviewVoiceNote
+	a.reviewVoiceNote = ""
+
+	injected, err := injector(prdPath, voiceNote)
+	if err != nil {
+		a.lastActivity = errPrefix + ": " + err.Error()
+		return a, nil
+	}
+	if !injected {
+		a.lastActivity = alreadyMsg
+		return a, nil
+	}
+
+	if resumeSession {
+		if lastSession := a.lastCompletedSession(prdPath); lastSession != "" {
+			a.manager.SetResumeOnce(a.prdName, lastSession)
+		}
+	}
+
+	a.viewMode = ViewDashboard
+	a.state = StateReady
+	a.lastActivity = startMsg
+	return a.startLoop()
+}
+
+// captureVoiceNote suspends the TUI, runs voice-capture via the current binary,
+// and sends back a voiceCaptureMsg with the transcript.
+func (a *App) captureVoiceNote() tea.Cmd {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "chief"
+	}
+
+	tmpFile, err := os.CreateTemp("", "chief-voice-*.txt")
+	if err != nil {
+		return func() tea.Msg {
+			return voiceCaptureMsg{}
+		}
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+
+	voiceCmd := exec.Command(exe, "voice-capture", "--out", tmpPath)
+	return tea.ExecProcess(voiceCmd, func(execErr error) tea.Msg {
+		defer os.Remove(tmpPath)
+		if execErr != nil {
+			return voiceCaptureMsg{}
+		}
+		data, err := os.ReadFile(tmpPath)
+		if err != nil || len(data) == 0 {
+			return voiceCaptureMsg{}
+		}
+		return voiceCaptureMsg{transcript: string(data)}
+	})
+}
+
+// lastCompletedSession returns the session ID of the last story that passed in the PRD,
+// or "" if no sessions are available.
+func (a *App) lastCompletedSession(prdPath string) string {
+	sessions, err := prd.LoadSessions(prdPath)
+	if err != nil || len(sessions) == 0 {
+		return ""
+	}
+	p, err := prd.LoadPRD(prdPath)
+	if err != nil {
+		return ""
+	}
+	// Walk stories in order, keep the last one that has a session.
+	var lastID string
+	for _, story := range p.UserStories {
+		if story.Passes {
+			if _, ok := sessions[story.ID]; ok {
+				lastID = story.ID
+			}
+		}
+	}
+	return sessions[lastID]
+}
+
 // renderCompletionView renders the completion screen.
 func (a *App) renderCompletionView() string {
 	a.completionScreen.SetSize(a.width, a.height)
@@ -1599,6 +1769,12 @@ func (a App) handleCompletionKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.viewMode = ViewPicker
 		}
 		return a, nil
+
+	case "r":
+		return a.triggerPostDevReview()
+
+	case "V":
+		return a, a.captureVoiceNote()
 
 	case "esc":
 		a.viewMode = ViewDashboard

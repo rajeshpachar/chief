@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/minicodemonkey/chief/internal/loop"
 	"github.com/minicodemonkey/chief/internal/prd"
 )
 
@@ -163,6 +164,12 @@ func (a *App) renderHeader() string {
 	stateStyle := GetStateStyle(a.state)
 	state := stateStyle.Render(fmt.Sprintf("[%s]", a.state.String()))
 
+	// Auth label (e.g. "claude.ai" or "API key")
+	var authPart string
+	if a.authLabel != "" {
+		authPart = "  " + SubtitleStyle.Render("["+a.authLabel+"]")
+	}
+
 	// Iteration count (current/max)
 	iteration := SubtitleStyle.Render(fmt.Sprintf("Iteration: %d/%d", a.iteration, a.maxIter))
 
@@ -171,7 +178,7 @@ func (a *App) renderHeader() string {
 	elapsedStr := SubtitleStyle.Render(fmt.Sprintf("Time: %s", formatDuration(elapsed)))
 
 	// Combine elements
-	leftPart := lipgloss.JoinHorizontal(lipgloss.Center, brand, "  ", state)
+	leftPart := lipgloss.JoinHorizontal(lipgloss.Center, brand, "  ", state, authPart)
 	rightPart := lipgloss.JoinHorizontal(lipgloss.Center, iteration, "  ", elapsedStr)
 
 	// Create the full header line with proper spacing
@@ -255,12 +262,24 @@ func (a *App) renderFooter() string {
 	} else {
 		// Dashboard view shortcuts
 		switch a.state {
-		case StateReady, StatePaused:
+		case StateReady:
+			voiceLabel := "V: voice note"
+			if a.reviewVoiceNote != "" {
+				voiceLabel = "V: voice✓"
+			}
+			shortcuts = []string{"s: start", "r: review prd", voiceLabel, "d: diff", "e: edit", "t: log", "n: new", "l: list", "1-9: switch", "?: help", "q: quit"}
+		case StatePaused:
 			shortcuts = []string{"s: start", "d: diff", "e: edit", "t: log", "n: new", "l: list", "1-9: switch", "?: help", "q: quit"}
 		case StateRunning:
 			shortcuts = []string{"p: pause", "x: stop", "d: diff", "t: log", "n: new", "l: list", "1-9: switch", "?: help", "q: quit"}
 		case StateStopped, StateError:
 			shortcuts = []string{"s: retry", "d: diff", "e: edit", "t: log", "n: new", "l: list", "1-9: switch", "?: help", "q: quit"}
+		case StateComplete:
+			voiceLabel := "V: voice note"
+			if a.reviewVoiceNote != "" {
+				voiceLabel = "V: voice✓"
+			}
+			shortcuts = []string{"r: review", voiceLabel, "d: diff", "e: edit", "t: log", "n: new", "l: list", "1-9: switch", "?: help", "q: quit"}
 		default:
 			shortcuts = []string{"d: diff", "e: edit", "t: log", "n: new", "l: list", "1-9: switch", "?: help", "q: quit"}
 		}
@@ -567,12 +586,30 @@ func (a *App) renderErrorPanel(width, height int) string {
 	content.WriteString(hintStyle.Render(fmt.Sprintf("💡 Tip: Check %s in the PRD directory for full error details.", logName)))
 	content.WriteString("\n\n")
 
-	// Retry instructions
+	// Context-aware guidance based on error type
 	content.WriteString(labelStyle.Render("What to do"))
 	content.WriteString("\n")
-	content.WriteString("• Press ")
-	content.WriteString(ShortcutKeyStyle.Render("s"))
-	content.WriteString(" to retry\n")
+
+	errMsg := ""
+	if a.err != nil {
+		errMsg = a.err.Error()
+	}
+
+	if loop.IsTerminalError(errMsg) {
+		// Credit / auth errors — don't suggest retrying
+		content.WriteString("• Top up API credits at console.anthropic.com, OR\n")
+		content.WriteString("• Log in with your Max/Pro subscription:\n")
+		content.WriteString("  ")
+		content.WriteString(ShortcutKeyStyle.Render("! claude logout && claude login"))
+		content.WriteString("\n")
+		content.WriteString("  then press ")
+		content.WriteString(ShortcutKeyStyle.Render("s"))
+		content.WriteString(" to retry\n")
+	} else {
+		content.WriteString("• Press ")
+		content.WriteString(ShortcutKeyStyle.Render("s"))
+		content.WriteString(" to retry\n")
+	}
 	content.WriteString("• Press ")
 	content.WriteString(ShortcutKeyStyle.Render("t"))
 	content.WriteString(" to view the log\n")

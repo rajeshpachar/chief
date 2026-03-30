@@ -32,9 +32,11 @@ func Resolve(flagAgent, flagPath string, cfg *config.Config) (loop.Provider, err
 		cliPath = strings.TrimSpace(cfg.Agent.CLIPath)
 	}
 
+	useSub := cfg == nil || cfg.Agent.UseSubscriptionEnabled()
+
 	switch providerName {
 	case "claude":
-		return NewClaudeProvider(cliPath), nil
+		return NewClaudeProviderWithOptions(cliPath, useSub), nil
 	case "codex":
 		return NewCodexProvider(cliPath), nil
 	case "opencode":

@@ -61,6 +61,8 @@ type Loop struct {
 	currentStoryID  string
 	addDirs         []string // additional directories to expose to the agent (e.g. --add-dir for Claude)
 	lastSessionID   string   // Claude session ID from the most recent result message (for --resume)
+	resumeOnce      string   // session ID to use with --resume on the very first iteration; cleared after use
+	lastErrorText   string   // human-readable error from the agent's result message (e.g. "Credit balance is too low")
 }
 
 // NewLoop creates a new Loop instance.
@@ -296,6 +298,11 @@ func (l *Loop) runIterationWithRetry(ctx context.Context) error {
 		}
 		l.mu.Unlock()
 
+		// Clear any previous error text before the new attempt
+		l.mu.Lock()
+		l.lastErrorText = ""
+		l.mu.Unlock()
+
 		// Run the iteration
 		err := l.runIteration(ctx)
 		if err == nil {
@@ -310,9 +317,16 @@ func (l *Loop) runIterationWithRetry(ctx context.Context) error {
 		// Check if stopped intentionally
 		l.mu.Lock()
 		stopped := l.stopped
+		errText := l.lastErrorText
 		l.mu.Unlock()
 		if stopped {
 			return nil
+		}
+
+		// Don't retry on terminal errors (credits exhausted, invalid key, etc.).
+		// These won't resolve themselves — retrying just wastes the user's time.
+		if errText != "" && IsTerminalError(errText) {
+			return fmt.Errorf("%s", errText)
 		}
 
 		lastErr = err
@@ -326,9 +340,19 @@ func (l *Loop) runIteration(ctx context.Context) error {
 	workDir := l.effectiveWorkDir()
 	cmd := l.provider.LoopCommand(ctx, l.prompt, workDir)
 
-	// Append --add-dir flags for providers that support it (Claude).
+	// Append Claude-specific flags.
 	l.mu.Lock()
 	if l.provider.Name() == "Claude" {
+		// --resume: use once if set, then clear so subsequent iterations start fresh.
+		if l.resumeOnce != "" {
+			// Insert --resume <id> right after the binary name (Args[0]).
+			newArgs := make([]string, 0, len(cmd.Args)+2)
+			newArgs = append(newArgs, cmd.Args[0])
+			newArgs = append(newArgs, "--resume", l.resumeOnce)
+			newArgs = append(newArgs, cmd.Args[1:]...)
+			cmd.Args = newArgs
+			l.resumeOnce = ""
+		}
 		for _, dir := range l.addDirs {
 			cmd.Args = append(cmd.Args, "--add-dir", dir)
 		}
@@ -491,6 +515,12 @@ func (l *Loop) processOutput(r io.Reader) {
 			if event.Type == EventResult && event.SessionID != "" {
 				l.lastSessionID = event.SessionID
 			}
+			if event.Type == EventError && event.Text != "" {
+				l.lastErrorText = event.Text
+			}
+			if event.SessionID != "" && l.lastSessionID == "" {
+				l.lastSessionID = event.SessionID
+			}
 			l.mu.Unlock()
 			l.events <- *event
 		}
@@ -510,6 +540,14 @@ func (l *Loop) logLine(line string) {
 	if l.logFile != nil {
 		l.logFile.WriteString(line + "\n")
 	}
+}
+
+// SetResumeSessionID sets a Claude session ID to resume on the very first iteration.
+// Cleared automatically after first use — subsequent iterations start fresh.
+func (l *Loop) SetResumeSessionID(id string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.resumeOnce = id
 }
 
 // Stop terminates the current agent process and stops the loop.
