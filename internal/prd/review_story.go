@@ -258,7 +258,7 @@ d) Auth headers: frontend must send the correct auth header (Bearer token, API k
    A new endpoint that requires auth but receives no credentials will silently fail in
    the browser with a 401/403 the user may not see.
 
-STEP 8 — Security and commit hygiene:
+STEP 7 — Security and commit hygiene:
 a) Auth on new routes: every new API endpoint or RPC must enforce authentication and
    authorisation. A route without an auth check is a security gap even if the PRD didn't
    mention it.
@@ -277,8 +277,8 @@ e) Commit message accuracy: read git log <fork-point>..HEAD. Does each message a
    describe what that commit actually changed? "Fix typo" that includes logic changes
    obscures history and must be corrected.
 
-STEP 9 — Decide:
-If every criterion is met and no issues from steps 3-8:
+STEP 8 — Decide:
+If every criterion is met and no issues from steps 3-7:
 - Commit: git commit --allow-empty -m "review: all criteria verified for %s"
 - Output <chief-done/>
 
@@ -367,6 +367,33 @@ e) Missing edge cases: are the following explicitly covered in acceptance criter
 f) Scope creep risk: does any story's description imply changes far beyond what the
    acceptance criteria test? If so, narrow the description or add criteria to bound it.
 
+g) Cross-layer completeness: if a story adds a feature spanning backend and frontend,
+   are there explicit acceptance criteria covering BOTH sides?
+   Common omissions: UI story exists, no API story; API story exists, no UI wiring.
+   Each changed layer must have at least one testable criterion.
+
+h) Wiring and registration requirements explicit: AI agents implement core logic but
+   skip registration steps unless criteria demand it. For each story, verify:
+   - New API route: is there a criterion that it is reachable (not just defined)?
+   - New pipeline step/executor: is registration in the dispatch map required?
+   - New UI page/component: is there a criterion that it appears in navigation/routing?
+   - New DB table: is a migration required? Is rollback covered?
+   If any registration step is load-bearing but absent from criteria, add it now.
+
+i) Test requirements explicit in criteria: if a criterion does not mention a test,
+   an AI agent will skip writing one. For every story check:
+   - At least one criterion requires a unit or integration test.
+   - Edge-case criteria are paired with a test requirement.
+   - New API endpoints have a criterion requiring an integration test.
+   Add "covered by a unit test" or "verified by integration test" where missing.
+
+j) Implementation hints sufficient: each story must give enough context to implement
+   without guessing. Flag stories missing:
+   - A reference to the existing pattern to follow (e.g., "follow pattern in X.py").
+   - Key files or classes to modify.
+   - Non-obvious constraints (ordering, idempotency, backwards-compat requirement).
+   Vague stories produce random AI implementations — tighten them before dev starts.
+
 STEP 3 — Decide:
 If the PRD is well-formed and every story is implementation-ready:
 - Commit: git commit --allow-empty -m "review: PRD approved for %s"
@@ -385,8 +412,12 @@ If issues are found:
 - [ ] README.md and CLAUDE.md read — project context understood
 - [ ] Each story checked for breaking changes and architecture alignment
 - [ ] All acceptance criteria are specific, testable, and unambiguous
-- [ ] Story ordering respects dependencies
-- [ ] Edge cases covered in acceptance criteria
+- [ ] Story ordering and priorities respect dependencies
+- [ ] Edge cases (nulls, auth failures, pagination, concurrency) in criteria
+- [ ] Cross-layer features have criteria covering both frontend and backend
+- [ ] Wiring/registration steps (router, dispatch map, migrations) explicit in criteria
+- [ ] Every story has at least one test requirement in its criteria
+- [ ] Each story has sufficient implementation hints (pattern reference, file, constraint)
 - [ ] PRD approved or revised with tracked changes
 `, preDevReviewStoryID, voiceSection, storyList, p.Project)
 }
