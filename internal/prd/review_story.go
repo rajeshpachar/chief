@@ -220,7 +220,45 @@ f) Fabricated symbols: for every import and external function call in new code, 
    symbol actually exists at that path in the current codebase. AI agents import functions
    that don't exist yet, were renamed, or live in a different module.
 
-STEP 6 — Security and commit hygiene:
+g) End-to-end wiring: new code must be reachable from an entry point — it is not enough
+   that the function exists. Verify:
+   - New API routes are registered in the router/app factory (not just defined in isolation).
+   - New pipeline steps/executors are registered in the step-type dispatch map.
+   - New UI pages/components are imported and mounted in the layout or routing config.
+   - New background tasks/workers are started in the service entry point.
+   - New config keys are actually read by runtime code (not just written).
+   Trace the call chain from entry point → new code. If any link is missing, the feature
+   is dead on arrival even though the implementation looks complete.
+
+STEP 6 — Frontend/backend API contract (only if the PRD touches both layers):
+For every new or changed API endpoint:
+a) Request shape: grep the frontend call site and the backend route handler side by side.
+   - HTTP method matches (GET vs POST vs PATCH).
+   - URL path and path parameters match exactly (including trailing slashes).
+   - Query parameter names match (frontend: ?foo=bar, backend: foo: str = Query(...)).
+   - Request body field names match — including casing (camelCase in frontend JSON vs
+     snake_case in backend Pydantic model). Check if the backend has a model_config
+     alias_generator; if not, field names must be identical.
+
+b) Response shape: check the backend response model against what the frontend actually reads.
+   - Field names the frontend accesses (response.data.someField) must exist in the backend
+     response model with the same name and type.
+   - Nested structures: if backend returns {"patient": {"id": ...}} but frontend reads
+     response.patientId, the contract is broken.
+   - Optional vs required: if frontend renders a field unconditionally, the backend must
+     always return it (not Optional with None default).
+   - Pagination: if backend paginates (returns {items, total, page}), frontend must handle
+     the wrapper — not assume a flat array.
+
+c) Error shape: does the frontend handle the backend's error format?
+   Check that error responses (4xx/5xx) use the same envelope the frontend expects
+   (e.g. {detail: "..."} vs {error: "...", message: "..."}).
+
+d) Auth headers: frontend must send the correct auth header (Bearer token, API key, cookie).
+   A new endpoint that requires auth but receives no credentials will silently fail in
+   the browser with a 401/403 the user may not see.
+
+STEP 8 — Security and commit hygiene:
 a) Auth on new routes: every new API endpoint or RPC must enforce authentication and
    authorisation. A route without an auth check is a security gap even if the PRD didn't
    mention it.
@@ -239,8 +277,8 @@ e) Commit message accuracy: read git log <fork-point>..HEAD. Does each message a
    describe what that commit actually changed? "Fix typo" that includes logic changes
    obscures history and must be corrected.
 
-STEP 7 — Decide:
-If every criterion is met and no issues from steps 3-6:
+STEP 9 — Decide:
+If every criterion is met and no issues from steps 3-8:
 - Commit: git commit --allow-empty -m "review: all criteria verified for %s"
 - Output <chief-done/>
 
@@ -262,6 +300,8 @@ If any gap is found:
 - [ ] Tests read and confirmed to actually test the implementation
 - [ ] All callers of changed symbols checked — incomplete refactors caught
 - [ ] New code checked: duplication, wrong layer, fabricated imports, dead code
+- [ ] End-to-end wiring verified: routes registered, dispatchers updated, entry points connected
+- [ ] Frontend/backend contract checked: URL, method, field names, response shape, error shape
 - [ ] Security: auth on new routes, no injection, no sensitive data in logs
 - [ ] Commit scope clean, commit messages accurate
 - [ ] Either all criteria clean, or specific RV fix stories added to prd.md
