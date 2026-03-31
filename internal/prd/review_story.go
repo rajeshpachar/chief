@@ -129,41 +129,142 @@ func buildReviewStoryMarkdown(p *PRD, priority int, voiceNote string) string {
 ### %s: Post-Implementation Review
 **Priority:** %d
 %s
-Audit the implementation of this entire PRD and verify that every acceptance
-criterion has been met. Work through the following steps:
+Audit the full implementation of this PRD. Work through every step in order — do not skip any.
 
-STEP 1 — Collect context:
-- Run: git diff main...HEAD (or git diff master...HEAD if main doesn't exist)
-  to see all changes made during this PRD.
-- Re-read this prd.md file to review every story (%s) and its acceptance criteria.
+STEP 1 — Understand the project:
+- Read README.md (repo root) for project overview and domain context.
+- Read CLAUDE.md (repo root, then ~/.claude/CLAUDE.md if it exists) for architecture rules,
+  naming conventions, forbidden patterns, and module-specific constraints.
+- Run: git log --oneline -20 to understand recent development rhythm and commit conventions.
 
-STEP 2 — Audit each story:
-For every story, verify in the git diff that:
-- The acceptance criterion is actually implemented (not just mentioned in a comment).
-- Edge cases are handled (nulls, empty inputs, auth failures, race conditions).
-- No obvious regressions: existing behaviour that the story didn't intend to change
-  should still work.
-- Existing functionality unrelated to this PRD is intact (no accidental breakage).
+STEP 2 — Determine exactly what changed:
+Do NOT assume the diff base — determine it:
+  git branch --show-current
+  git merge-base HEAD origin/main 2>/dev/null \
+    || git merge-base HEAD origin/dev 2>/dev/null \
+    || git merge-base HEAD origin/master 2>/dev/null \
+    || git rev-list --max-parents=0 HEAD
+  git diff <fork-point>...HEAD --stat    # which files changed
+  git diff <fork-point>...HEAD           # full diff
+  git log <fork-point>..HEAD --oneline   # commit list for this PRD
 
-STEP 3 — Decide:
-If every acceptance criterion is fully satisfied:
-- Commit a review report: git commit --allow-empty -m "review: all criteria verified for %s"
+If on primary branch with no fork point: git diff HEAD~<N>..HEAD where N = commits in PRD.
+
+STEP 3 — Audit each story (%s) against the diff:
+For EVERY story and EVERY acceptance criterion — check all of these:
+
+a) Real implementation vs stub: Is the criterion in actual running code, or is it a stub?
+   Search new code for: "pass", "TODO", "FIXME", "raise NotImplementedError",
+   "return None", "return []", "return {}", "not implemented", placeholder strings.
+   A criterion is NOT met if its implementation is a stub or a comment.
+
+b) Copy-paste context leak: Does new code reference variable names, table names, IDs,
+   tenant values, or file paths that belong to a different module and were blindly copied?
+   Read new code in context — a value that makes no sense here came from somewhere else.
+
+c) Edge cases and input validation: Are nulls, empty inputs, missing config keys, out-of-range
+   values, and auth failures handled? For API endpoints: inputs must be validated before use,
+   not used optimistically and hoped-for.
+
+d) Error handling completeness: All errors wrapped with context and propagated.
+   No silent swallows: "except Exception: pass", "if err != nil { return }", bare "_ = err".
+   Errors must be logged or returned — not discarded.
+
+e) Async correctness (if project uses async): All awaitable calls are awaited.
+   No sync blocking calls (DB queries, file I/O, HTTP) in async context without executor.
+   No asyncio.run() / loop.run_until_complete() inside a running event loop.
+
+f) Partial failure rollback: Multi-step operations writing to DB, files, or external services —
+   does a failure at step 2 leave step 1's writes in a dirty state?
+   There must be a transaction, rollback path, or compensating cleanup.
+
+g) Test validity — read the tests, not just their names:
+   Flag as invalid if any of these are true:
+   - The test mocks the function it is supposed to test.
+   - The assertion is trivially true (assert True, assert result == mock.return_value).
+   - Deleting the implementation would still leave the test green.
+   - The test mutates global state (DB rows, class vars, files) with no teardown,
+     so it would corrupt the next test in the suite.
+
+STEP 4 — Related files: compatibility and completeness:
+For each changed public symbol (function, class, constant, route, schema field):
+  grep -r "<symbol>" --include="*.py" --include="*.go" --include="*.ts" \
+    --include="*.tsx" --include="*.js" --include="*.rb" --include="*.rs" . \
+    | grep -v "test_\|_test\."
+Read the top callers and check:
+- Signature changes: are ALL call sites updated to match new parameters?
+- Renames: is the old name fully gone, or do some callers still use it?
+- Schema / model changes: is there a DB migration? Are serializers updated?
+- New required config keys: do they have safe defaults so existing deployments don't break?
+Flag incomplete refactors (definition updated, callers not) explicitly.
+
+STEP 5 — Code quality (read new code directly, not just the diff):
+a) Hardcoding and config drift: grep for hardcoded IDs, tenant names, ports, URLs, API keys,
+   magic numbers. Also check: does an existing constant already define this value?
+   The same literal in 2+ places is config drift — one must reference the other.
+
+b) Duplication: search for functions with similar names or logic before concluding the new
+   code is the only implementation. AI agents frequently write a new helper that duplicates
+   one already in a sibling file.
+
+c) Wrong layer: business logic in a route handler, SQL in a model, HTTP calls in a data layer?
+   Check against layer boundaries in CLAUDE.md.
+
+d) Architecture violations: check each new file and function against the specific rules in
+   CLAUDE.md (data separation, sharding, transaction versioning, DRY, etc.).
+
+e) Dead code: commented-out blocks, unused imports, functions added but never called,
+   config keys written but never read.
+
+f) Fabricated symbols: for every import and external function call in new code, verify the
+   symbol actually exists at that path in the current codebase. AI agents import functions
+   that don't exist yet, were renamed, or live in a different module.
+
+STEP 6 — Security and commit hygiene:
+a) Auth on new routes: every new API endpoint or RPC must enforce authentication and
+   authorisation. A route without an auth check is a security gap even if the PRD didn't
+   mention it.
+
+b) Injection: user input must never be concatenated into SQL, shell commands, file paths,
+   or template strings. It must be parameterized or sanitized.
+
+c) Sensitive data in logs: passwords, tokens, PII, and internal IDs must not appear in
+   log output at INFO or above. They must be masked or omitted.
+
+d) Commit scope: run git diff --stat <fork-point>...HEAD and check for changed files
+   unrelated to this PRD. Agent sessions routinely edit adjacent files "while there".
+   Flag every unrelated change — it belongs in a separate commit.
+
+e) Commit message accuracy: read git log <fork-point>..HEAD. Does each message accurately
+   describe what that commit actually changed? "Fix typo" that includes logic changes
+   obscures history and must be corrected.
+
+STEP 7 — Decide:
+If every criterion is met and no issues from steps 3-6:
+- Commit: git commit --allow-empty -m "review: all criteria verified for %s"
 - Output <chief-done/>
 
-If gaps or issues are found:
-- Edit THIS prd.md file (not a new file) and append fix stories immediately
-  after this block. Use IDs RV-001, RV-002, etc. Each story needs:
-    ### RV-001: <short title>
+If any gap is found:
+- Edit THIS prd.md (not a new file) and append fix stories after this block.
+  Use IDs RV-001, RV-002, etc. Each needs:
+    ### RV-001: <short title — file, symbol, issue type>
     **Priority:** 1
-    <one paragraph describing exactly what is missing and how to fix it>
+    <one paragraph: exact location, what is wrong, how to fix it>
     - [ ] <specific, testable acceptance criterion>
-  Keep it tight — max 5 fix stories, group related issues.
-- Commit the updated prd.md: git commit -m "review: found N gaps, added fix stories"
+  Group minor issues. Max 5 stories.
+- Commit: git commit -m "review: found N gaps, added fix stories"
 - Output <chief-done/>
 
-- [ ] Git diff reviewed against every acceptance criterion
-- [ ] Existing functionality verified intact
-- [ ] Either all criteria verified, or fix stories added to prd.md
+- [ ] README.md and CLAUDE.md read
+- [ ] Diff base correctly determined (not assumed)
+- [ ] Every criterion checked — stubs, copy-paste leaks, and context errors caught
+- [ ] Async correctness and partial-failure rollback verified
+- [ ] Tests read and confirmed to actually test the implementation
+- [ ] All callers of changed symbols checked — incomplete refactors caught
+- [ ] New code checked: duplication, wrong layer, fabricated imports, dead code
+- [ ] Security: auth on new routes, no injection, no sensitive data in logs
+- [ ] Commit scope clean, commit messages accurate
+- [ ] Either all criteria clean, or specific RV fix stories added to prd.md
 `, reviewStoryID, priority, voiceSection, storyList, p.Project)
 }
 
@@ -192,27 +293,42 @@ func buildPreDevReviewStoryMarkdown(p *PRD, voiceNote string) string {
 Before any implementation begins, review this PRD against the project's existing
 architecture, patterns, and conventions. Stories to review: %s
 
-STEP 1 — Understand the project context:
-- Read CLAUDE.md (in this directory and ~/.claude/) for architecture guidelines,
-  patterns, naming conventions, and constraints.
+STEP 1 — Understand the project:
+- Read README.md (repo root) for project overview and domain context.
+- Read CLAUDE.md (repo root and ~/.claude/CLAUDE.md if present) for architecture rules,
+  naming conventions, forbidden patterns, and module-specific constraints.
 - Run: git log --oneline -20 to understand the development rhythm and recent changes.
-- Skim key source files/directories to identify existing patterns (error handling,
-  naming, package structure, API conventions).
+- Skim 3-5 key source files to identify existing patterns: error handling style,
+  naming conventions, package/module structure, API conventions, test patterns.
 
-STEP 2 — Review each planned story against:
-- Breaking changes: does it modify public interfaces, APIs, or shared behaviour that
-  other code depends on? If so, the story must explicitly handle backwards compatibility.
-- Architecture alignment: does the approach fit existing patterns, or does it introduce
-  inconsistency that will create tech debt?
-- Acceptance criteria quality: are criteria specific and testable? Rewrite any vague
-  criteria ("should work", "handle errors") to be unambiguous and verifiable.
-- Story dependencies: are there ordering constraints between stories that the current
-  priority order doesn't respect? Fix Priority values if so.
-- Missing edge cases: are null inputs, auth failures, concurrency, and error paths covered
-  in the acceptance criteria?
+STEP 2 — Review each planned story for implementation readiness:
+For EVERY story, check all of the following:
+
+a) Breaking changes: does it modify public interfaces, APIs, types, or shared behaviour
+   that other code depends on? If so, the story must explicitly state how backwards
+   compatibility is handled or that it is intentionally broken.
+
+b) Architecture alignment: does the approach fit existing patterns? Flag any story that
+   would introduce a new pattern where an established one already exists (e.g. a new
+   error-handling style, a new way to do auth, a different data access pattern).
+
+c) Acceptance criteria quality: every criterion must be specific, testable, and
+   unambiguous. Rewrite any vague criteria ("should work", "handle errors", "look good")
+   to be concrete and verifiable with a command or assertion.
+
+d) Story ordering and dependencies: are there ordering constraints the current Priority
+   values don't respect? (e.g. a story that depends on a shared component that is built
+   in a later story) Adjust Priority values if so.
+
+e) Missing edge cases: are the following explicitly covered in acceptance criteria where
+   relevant — null/empty inputs, missing keys, auth failures, concurrent access, large
+   payloads, pagination, error propagation?
+
+f) Scope creep risk: does any story's description imply changes far beyond what the
+   acceptance criteria test? If so, narrow the description or add criteria to bound it.
 
 STEP 3 — Decide:
-If the PRD is well-formed and implementation-ready:
+If the PRD is well-formed and every story is implementation-ready:
 - Commit: git commit --allow-empty -m "review: PRD approved for %s"
 - Output <chief-done/>
 
@@ -226,9 +342,11 @@ If issues are found:
 - Commit: git commit -m "review: PRD revised before dev — N issues corrected"
 - Output <chief-done/>
 
-- [ ] Project architecture and patterns reviewed
-- [ ] Each story checked for breaking changes and alignment
-- [ ] All acceptance criteria are specific and testable
-- [ ] PRD approved or revised
+- [ ] README.md and CLAUDE.md read — project context understood
+- [ ] Each story checked for breaking changes and architecture alignment
+- [ ] All acceptance criteria are specific, testable, and unambiguous
+- [ ] Story ordering respects dependencies
+- [ ] Edge cases covered in acceptance criteria
+- [ ] PRD approved or revised with tracked changes
 `, preDevReviewStoryID, voiceSection, storyList, p.Project)
 }

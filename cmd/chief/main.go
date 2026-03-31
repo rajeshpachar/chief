@@ -739,8 +739,8 @@ func resolveProvider(flagAgent, flagPath string) loop.Provider {
 	}
 	cfg, err := config.Load(cwd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to load .chief/config.yaml: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Warning: .chief/config.yaml has a syntax error (%v) — using defaults. Run 'chief setup' to fix it.\n", err)
+		cfg = config.Default()
 	}
 	provider, err := agent.Resolve(flagAgent, flagPath, cfg)
 	if err != nil {
